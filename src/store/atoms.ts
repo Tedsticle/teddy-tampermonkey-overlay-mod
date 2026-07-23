@@ -118,7 +118,6 @@ export const myEggInventory = makeAtom<ToolInventoryState>("myEggInventoryAtom")
 export const myDecorInventory = makeAtom<DecorInventoryState>("myDecorInventoryAtom");
 export const mySeedSiloItems = makeAtom<SeedInventoryState>("mySeedSiloItemsAtom");
 export const myDecorShedItems = makeAtom<DecorInventoryState>("myDecorShedItemsAtom");
-export const myFeedingTroughItems = makeAtom<CropInventoryState>("myFeedingTroughItemsAtom");
 export const myPetInfos = makeAtom<PetState>("myPetInfosAtom");
 export const myPetSlotInfos = makeAtom<any>("myPetSlotInfosAtom");
 export const myPrimitivePetSlots = makeAtom<any[]>("myPrimitivePetSlotsAtom");
@@ -362,7 +361,6 @@ export const Atoms = {
     myDecorInventory,
     mySeedSiloItems,
     myDecorShedItems,
-    myFeedingTroughItems,
     favoriteIds,
     mySelectedItemId,
     mySelectedItemName,

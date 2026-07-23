@@ -91,6 +91,18 @@ function _countTroughByCrop(crop: string): number {
   return arr.filter((it) => String((it as any)?.species || "") === crop).length;
 }
 
+/**
+ * There is no dedicated "feeding trough contents" atom — the real game atom
+ * list has no `myFeedingTroughItemsAtom`. Trough contents actually live
+ * inside the generic inventory atom's `storages` array, under the
+ * `FeedingTrough` entry (alongside PetHutch/SeedSilo). Derive from there.
+ */
+function _extractTroughItems(rawInventory: any): CropItem[] {
+  const storages = Array.isArray(rawInventory?.storages) ? rawInventory.storages : [];
+  const trough = storages.find((s: any) => String(s?.decorId || "") === "FeedingTrough");
+  return Array.isArray(trough?.items) ? trough.items : [];
+}
+
 /** Pet species currently in your active slots (same source as the Instant Feed widget). */
 export function extractActiveSpecies(rawSlots: unknown): Set<string> {
   const arr = Array.isArray(rawSlots) ? rawSlots : [];
@@ -144,22 +156,6 @@ async function _attemptRestock(species: string, cfg: AutoFeedSpeciesConfig): Pro
   }
 }
 
-async function _tick(): Promise<void> {
-  _ensureConfigLoaded();
-  if (!_config.masterEnabled) return;
-  for (const [species, cfg] of Object.entries(_config.species)) {
-    if (!cfg.enabled || !cfg.crop || cfg.restockTo <= 0) continue;
-    if (!_activeSpeciesSet.has(species)) continue; // only restock for pets currently out
-    if (_inFlight.has(species)) continue;
-    _inFlight.add(species);
-    try {
-      await _attemptRestock(species, cfg);
-    } finally {
-      _inFlight.delete(species);
-    }
-  }
-}
-
 /**
  * NOTE: same caveat as the restock path — `toInventoryIndex` is a best-effort
  * guess (end of the current raw inventory list) and hasn't been confirmed
@@ -174,6 +170,40 @@ async function _retrieveOneFromTrough(item: CropItem): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Pulls trough items of `cfg.crop` back to inventory when the trough holds
+ * more than the configured target (e.g. you lowered the threshold after it
+ * was already topped up). */
+async function _attemptTrim(species: string, cfg: AutoFeedSpeciesConfig): Promise<void> {
+  if (!cfg.crop) return;
+  let guard = 0;
+  while (_countTroughByCrop(cfg.crop) > cfg.restockTo && guard++ < TROUGH_CAPACITY) {
+    const arr = Array.isArray(_lastTrough) ? _lastTrough : [];
+    const item = arr.find((it) => String((it as any)?.species || "") === cfg.crop) as CropItem | undefined;
+    if (!item?.id) break;
+    const ok = await _retrieveOneFromTrough(item);
+    if (!ok) break;
+    // Give the trough atom a moment to reflect the retrieval before re-reading it.
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+async function _tick(): Promise<void> {
+  _ensureConfigLoaded();
+  if (!_config.masterEnabled) return;
+  for (const [species, cfg] of Object.entries(_config.species)) {
+    if (!cfg.enabled || !cfg.crop || cfg.restockTo <= 0) continue;
+    if (!_activeSpeciesSet.has(species)) continue; // only restock for pets currently out
+    if (_inFlight.has(species)) continue;
+    _inFlight.add(species);
+    try {
+      await _attemptRestock(species, cfg);
+      await _attemptTrim(species, cfg);
+    } finally {
+      _inFlight.delete(species);
+    }
   }
 }
 
@@ -236,22 +266,19 @@ export const AutoFeedService = {
     _started = true;
     _ensureConfigLoaded();
 
-    try { _lastTrough = await Atoms.inventory.myFeedingTroughItems.get(); } catch {}
     try { _lastCropInv = await Atoms.inventory.myCropInventory.get(); } catch {}
-    try { _lastInventoryRaw = ((await Atoms.inventory.myInventory.get()) as any)?.items ?? []; } catch {}
+    try {
+      const rawInv = await Atoms.inventory.myInventory.get();
+      _lastInventoryRaw = (rawInv as any)?.items ?? [];
+      _lastTrough = _extractTroughItems(rawInv);
+    } catch {}
     try { _lastInventoryMaxed = !!(await isMyInventoryAtMaxLength.get()); } catch {}
     try { _activeSpeciesSet = extractActiveSpecies(await Atoms.pets.myPrimitivePetSlots.get()); } catch {}
 
-    let unsubTrough: (() => void) | null = null;
     let unsubCrop: (() => void) | null = null;
     let unsubInventory: (() => void) | null = null;
     let unsubMaxed: (() => void) | null = null;
     let unsubActivePets: (() => void) | null = null;
-    try {
-      unsubTrough = await Atoms.inventory.myFeedingTroughItems.onChange((next) => {
-        _lastTrough = next;
-      });
-    } catch {}
     try {
       unsubCrop = await Atoms.inventory.myCropInventory.onChange((next) => {
         _lastCropInv = next;
@@ -260,6 +287,7 @@ export const AutoFeedService = {
     try {
       unsubInventory = await Atoms.inventory.myInventory.onChange((next: any) => {
         _lastInventoryRaw = next?.items ?? [];
+        _lastTrough = _extractTroughItems(next);
       });
     } catch {}
     try {
@@ -283,7 +311,6 @@ export const AutoFeedService = {
 
     return () => {
       _started = false;
-      try { unsubTrough?.(); } catch {}
       try { unsubCrop?.(); } catch {}
       try { unsubInventory?.(); } catch {}
       try { unsubMaxed?.(); } catch {}
@@ -323,7 +350,7 @@ export const AutoFeedService = {
       crop: patch.crop !== undefined ? patch.crop : cur.crop,
       restockTo:
         patch.restockTo != null && Number.isFinite(patch.restockTo)
-          ? Math.max(0, Math.min(TROUGH_CAPACITY, Math.floor(patch.restockTo)))
+          ? Math.max(1, Math.min(TROUGH_CAPACITY, Math.floor(patch.restockTo)))
           : cur.restockTo,
       excludeMutations: patch.excludeMutations
         ? patch.excludeMutations.filter((m): m is string => typeof m === "string")

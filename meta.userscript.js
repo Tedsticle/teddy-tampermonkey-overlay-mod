@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         Teddy's Magic Helper
 // @namespace    Quinoa
-// @version      1.2
+// @version      1.3
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
 // @match        https://magicgarden.gg/r/*

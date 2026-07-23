@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Teddy's Magic Helper
 // @namespace    Quinoa
-// @version      1.2
+// @version      1.3
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
 // @match        https://magicgarden.gg/r/*
@@ -3752,7 +3752,6 @@
   var myDecorInventory = makeAtom("myDecorInventoryAtom");
   var mySeedSiloItems = makeAtom("mySeedSiloItemsAtom");
   var myDecorShedItems = makeAtom("myDecorShedItemsAtom");
-  var myFeedingTroughItems = makeAtom("myFeedingTroughItemsAtom");
   var myPetInfos = makeAtom("myPetInfosAtom");
   var myPetSlotInfos = makeAtom("myPetSlotInfosAtom");
   var myPrimitivePetSlots = makeAtom("myPrimitivePetSlotsAtom");
@@ -3888,7 +3887,6 @@
       myDecorInventory,
       mySeedSiloItems,
       myDecorShedItems,
-      myFeedingTroughItems,
       favoriteIds,
       mySelectedItemId,
       mySelectedItemName,
@@ -25941,6 +25939,11 @@
     const arr = Array.isArray(_lastTrough) ? _lastTrough : [];
     return arr.filter((it) => String(it?.species || "") === crop).length;
   }
+  function _extractTroughItems(rawInventory) {
+    const storages = Array.isArray(rawInventory?.storages) ? rawInventory.storages : [];
+    const trough = storages.find((s) => String(s?.decorId || "") === "FeedingTrough");
+    return Array.isArray(trough?.items) ? trough.items : [];
+  }
   function extractActiveSpecies(rawSlots) {
     const arr = Array.isArray(rawSlots) ? rawSlots : [];
     const out = /* @__PURE__ */ new Set();
@@ -25981,6 +25984,29 @@
       }
     }
   }
+  async function _retrieveOneFromTrough(item) {
+    if (!item?.id) return false;
+    if (_lastInventoryMaxed) return false;
+    const toIndex = Array.isArray(_lastInventoryRaw) ? _lastInventoryRaw.length : 0;
+    try {
+      await PlayerService.retrieveItemFromFeedingTrough(item.id, toIndex);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async function _attemptTrim(species, cfg) {
+    if (!cfg.crop) return;
+    let guard = 0;
+    while (_countTroughByCrop(cfg.crop) > cfg.restockTo && guard++ < TROUGH_CAPACITY) {
+      const arr = Array.isArray(_lastTrough) ? _lastTrough : [];
+      const item = arr.find((it) => String(it?.species || "") === cfg.crop);
+      if (!item?.id) break;
+      const ok = await _retrieveOneFromTrough(item);
+      if (!ok) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
   async function _tick() {
     _ensureConfigLoaded();
     if (!_config.masterEnabled) return;
@@ -25991,20 +26017,10 @@
       _inFlight.add(species);
       try {
         await _attemptRestock(species, cfg);
+        await _attemptTrim(species, cfg);
       } finally {
         _inFlight.delete(species);
       }
-    }
-  }
-  async function _retrieveOneFromTrough(item) {
-    if (!item?.id) return false;
-    if (_lastInventoryMaxed) return false;
-    const toIndex = Array.isArray(_lastInventoryRaw) ? _lastInventoryRaw.length : 0;
-    try {
-      await PlayerService.retrieveItemFromFeedingTrough(item.id, toIndex);
-      return true;
-    } catch {
-      return false;
     }
   }
   async function _rebalanceTroughForActiveSpecies() {
@@ -26053,15 +26069,13 @@
       _started = true;
       _ensureConfigLoaded();
       try {
-        _lastTrough = await Atoms.inventory.myFeedingTroughItems.get();
-      } catch {
-      }
-      try {
         _lastCropInv = await Atoms.inventory.myCropInventory.get();
       } catch {
       }
       try {
-        _lastInventoryRaw = (await Atoms.inventory.myInventory.get())?.items ?? [];
+        const rawInv = await Atoms.inventory.myInventory.get();
+        _lastInventoryRaw = rawInv?.items ?? [];
+        _lastTrough = _extractTroughItems(rawInv);
       } catch {
       }
       try {
@@ -26072,17 +26086,10 @@
         _activeSpeciesSet = extractActiveSpecies(await Atoms.pets.myPrimitivePetSlots.get());
       } catch {
       }
-      let unsubTrough = null;
       let unsubCrop = null;
       let unsubInventory = null;
       let unsubMaxed = null;
       let unsubActivePets = null;
-      try {
-        unsubTrough = await Atoms.inventory.myFeedingTroughItems.onChange((next) => {
-          _lastTrough = next;
-        });
-      } catch {
-      }
       try {
         unsubCrop = await Atoms.inventory.myCropInventory.onChange((next) => {
           _lastCropInv = next;
@@ -26092,6 +26099,7 @@
       try {
         unsubInventory = await Atoms.inventory.myInventory.onChange((next) => {
           _lastInventoryRaw = next?.items ?? [];
+          _lastTrough = _extractTroughItems(next);
         });
       } catch {
       }
@@ -26116,10 +26124,6 @@
       void _tick();
       return () => {
         _started = false;
-        try {
-          unsubTrough?.();
-        } catch {
-        }
         try {
           unsubCrop?.();
         } catch {
@@ -26164,7 +26168,7 @@
       const next = {
         enabled: patch.enabled != null ? !!patch.enabled : cur.enabled,
         crop: patch.crop !== void 0 ? patch.crop : cur.crop,
-        restockTo: patch.restockTo != null && Number.isFinite(patch.restockTo) ? Math.max(0, Math.min(TROUGH_CAPACITY, Math.floor(patch.restockTo))) : cur.restockTo,
+        restockTo: patch.restockTo != null && Number.isFinite(patch.restockTo) ? Math.max(1, Math.min(TROUGH_CAPACITY, Math.floor(patch.restockTo))) : cur.restockTo,
         excludeMutations: patch.excludeMutations ? patch.excludeMutations.filter((m) => typeof m === "string") : cur.excludeMutations
       };
       if (next.crop) {
@@ -31202,7 +31206,7 @@
   // src/utils/version.ts
   function getLocalVersion() {
     if (true) {
-      return "1.2";
+      return "1.3";
     }
     if (typeof GM_info !== "undefined" && GM_info?.script?.version) {
       return GM_info.script.version;
@@ -46121,10 +46125,10 @@ next: ${next}`;
       const thresholdRow = document.createElement("div");
       Object.assign(thresholdRow.style, { display: "flex", flexDirection: "column", gap: "4px" });
       const thresholdLabel = document.createElement("div");
-      thresholdLabel.textContent = `Keep this many in the trough (0-${TROUGH_CAPACITY})`;
+      thresholdLabel.textContent = `Keep this many in the trough (1-${TROUGH_CAPACITY})`;
       thresholdLabel.style.fontSize = "12px";
       thresholdLabel.style.opacity = "0.8";
-      const thresholdInput = ui.inputNumber(0, TROUGH_CAPACITY, 1, cfg.restockTo);
+      const thresholdInput = ui.inputNumber(1, TROUGH_CAPACITY, 1, Math.max(1, cfg.restockTo));
       thresholdRow.append(thresholdLabel, thresholdInput.wrap);
       card2.appendChild(thresholdRow);
       const mutationRow = document.createElement("div");

@@ -252,10 +252,10 @@ function renderAutoFeedTab(view: HTMLElement, ui: Menu) {
     const thresholdRow = document.createElement("div");
     Object.assign(thresholdRow.style, { display: "flex", flexDirection: "column", gap: "4px" } as CSSStyleDeclaration);
     const thresholdLabel = document.createElement("div");
-    thresholdLabel.textContent = `Keep this many in the trough (0-${TROUGH_CAPACITY})`;
+    thresholdLabel.textContent = `Keep this many in the trough (1-${TROUGH_CAPACITY})`;
     thresholdLabel.style.fontSize = "12px";
     thresholdLabel.style.opacity = "0.8";
-    const thresholdInput = ui.inputNumber(0, TROUGH_CAPACITY, 1, cfg.restockTo) as HTMLInputElement & { wrap: HTMLElement };
+    const thresholdInput = ui.inputNumber(1, TROUGH_CAPACITY, 1, Math.max(1, cfg.restockTo)) as HTMLInputElement & { wrap: HTMLElement };
     thresholdRow.append(thresholdLabel, thresholdInput.wrap);
     card.appendChild(thresholdRow);
 
