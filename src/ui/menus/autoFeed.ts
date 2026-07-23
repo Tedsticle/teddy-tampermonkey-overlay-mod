@@ -324,7 +324,7 @@ function renderAutoFeedTab(view: HTMLElement, ui: Menu) {
     function persist() {
       const restockTo = Number(thresholdInput.value) || 0;
       const crop = cropSelect.value || null;
-      const exceeds = crop ? AutoFeedService.wouldExceedCap(species!, restockTo) : false;
+      const exceeds = crop ? AutoFeedService.wouldExceedCap(species!, crop, restockTo) : false;
       capWarning.style.display = exceeds ? "block" : "none";
       capWarning.textContent = exceeds
         ? `This would put your configured totals above the trough's ${TROUGH_CAPACITY}-crop cap.`

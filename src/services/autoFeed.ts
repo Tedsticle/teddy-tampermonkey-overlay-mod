@@ -129,17 +129,18 @@ function _pickCropInventoryItem(crop: string, excludeMutations: string[]): CropI
   return null;
 }
 
+type CropTarget = { crop: string; restockTo: number; excludeMutations: string[] };
+
 /**
  * NOTE: the exact meaning of `toStorageIndex` for a trough insert hasn't been
  * confirmed live yet — this assumes "next free slot = current trough item
  * count" and needs verifying in-game before relying on it.
  */
-async function _attemptRestock(species: string, cfg: AutoFeedSpeciesConfig): Promise<void> {
-  if (!cfg.crop) return;
-  const need = cfg.restockTo - _countTroughByCrop(cfg.crop);
+async function _attemptRestock(target: CropTarget): Promise<void> {
+  const need = target.restockTo - _countTroughByCrop(target.crop);
   if (need <= 0) return;
 
-  const item = _pickCropInventoryItem(cfg.crop, cfg.excludeMutations);
+  const item = _pickCropInventoryItem(target.crop, target.excludeMutations);
   if (!item?.id) return; // nothing eligible right now; retried on next poll
 
   const troughLen = Array.isArray(_lastTrough) ? _lastTrough.length : 0;
@@ -173,15 +174,14 @@ async function _retrieveOneFromTrough(item: CropItem): Promise<boolean> {
   }
 }
 
-/** Pulls trough items of `cfg.crop` back to inventory when the trough holds
- * more than the configured target (e.g. you lowered the threshold after it
+/** Pulls trough items of `target.crop` back to inventory when the trough
+ * holds more than the combined target (e.g. you lowered a threshold after it
  * was already topped up). */
-async function _attemptTrim(species: string, cfg: AutoFeedSpeciesConfig): Promise<void> {
-  if (!cfg.crop) return;
+async function _attemptTrim(target: CropTarget): Promise<void> {
   let guard = 0;
-  while (_countTroughByCrop(cfg.crop) > cfg.restockTo && guard++ < TROUGH_CAPACITY) {
+  while (_countTroughByCrop(target.crop) > target.restockTo && guard++ < TROUGH_CAPACITY) {
     const arr = Array.isArray(_lastTrough) ? _lastTrough : [];
-    const item = arr.find((it) => String((it as any)?.species || "") === cfg.crop) as CropItem | undefined;
+    const item = arr.find((it) => String((it as any)?.species || "") === target.crop) as CropItem | undefined;
     if (!item?.id) break;
     const ok = await _retrieveOneFromTrough(item);
     if (!ok) break;
@@ -190,19 +190,43 @@ async function _attemptTrim(species: string, cfg: AutoFeedSpeciesConfig): Promis
   }
 }
 
-async function _tick(): Promise<void> {
-  _ensureConfigLoaded();
-  if (!_config.masterEnabled) return;
+/**
+ * The trough is a shared pool keyed only by crop species, not partitioned
+ * per pet. If two active species are both assigned the same crop with
+ * different thresholds, treating each species' threshold independently makes
+ * them fight (one restocks up to its target, the other trims back down to
+ * its own lower target, forever). Instead, group by crop and use the max
+ * threshold and the union of mutation exclusions across everyone who shares
+ * it, so there's a single authoritative target per crop.
+ */
+function _buildCropTargets(): CropTarget[] {
+  const byCrop = new Map<string, { restockTo: number; excludeMutations: Set<string> }>();
   for (const [species, cfg] of Object.entries(_config.species)) {
     if (!cfg.enabled || !cfg.crop || cfg.restockTo <= 0) continue;
     if (!_activeSpeciesSet.has(species)) continue; // only restock for pets currently out
-    if (_inFlight.has(species)) continue;
-    _inFlight.add(species);
+    const entry = byCrop.get(cfg.crop) ?? { restockTo: 0, excludeMutations: new Set<string>() };
+    entry.restockTo = Math.max(entry.restockTo, cfg.restockTo);
+    for (const m of cfg.excludeMutations) entry.excludeMutations.add(m);
+    byCrop.set(cfg.crop, entry);
+  }
+  return Array.from(byCrop.entries()).map(([crop, entry]) => ({
+    crop,
+    restockTo: entry.restockTo,
+    excludeMutations: Array.from(entry.excludeMutations),
+  }));
+}
+
+async function _tick(): Promise<void> {
+  _ensureConfigLoaded();
+  if (!_config.masterEnabled) return;
+  for (const target of _buildCropTargets()) {
+    if (_inFlight.has(target.crop)) continue;
+    _inFlight.add(target.crop);
     try {
-      await _attemptRestock(species, cfg);
-      await _attemptTrim(species, cfg);
+      await _attemptRestock(target);
+      await _attemptTrim(target);
     } finally {
-      _inFlight.delete(species);
+      _inFlight.delete(target.crop);
     }
   }
 }
@@ -368,19 +392,34 @@ export const AutoFeedService = {
     return { ...next };
   },
 
-  /** Sum of restockTo across all enabled+assigned species (for the 9-slot cap warning). */
+  /** Sum of per-crop max targets across all enabled+assigned species (for the
+   * 9-slot cap warning). Species sharing the same crop share one pool, so
+   * they're deduped by max — not summed — same as the restock engine. */
   getConfiguredRestockTotal(excludingSpecies?: string): number {
     _ensureConfigLoaded();
-    let total = 0;
+    const byCrop = new Map<string, number>();
     for (const [s, cfg] of Object.entries(_config.species)) {
       if (s === excludingSpecies) continue;
-      if (cfg.enabled && cfg.crop) total += cfg.restockTo;
+      if (!cfg.enabled || !cfg.crop) continue;
+      byCrop.set(cfg.crop, Math.max(byCrop.get(cfg.crop) ?? 0, cfg.restockTo));
     }
+    let total = 0;
+    for (const v of byCrop.values()) total += v;
     return total;
   },
 
-  wouldExceedCap(species: string, restockTo: number): boolean {
-    return this.getConfiguredRestockTotal(species) + Math.max(0, restockTo) > TROUGH_CAPACITY;
+  wouldExceedCap(species: string, crop: string | null, restockTo: number): boolean {
+    _ensureConfigLoaded();
+    const byCrop = new Map<string, number>();
+    for (const [s, cfg] of Object.entries(_config.species)) {
+      if (s === species) continue;
+      if (!cfg.enabled || !cfg.crop) continue;
+      byCrop.set(cfg.crop, Math.max(byCrop.get(cfg.crop) ?? 0, cfg.restockTo));
+    }
+    if (crop) byCrop.set(crop, Math.max(byCrop.get(crop) ?? 0, Math.max(0, restockTo)));
+    let total = 0;
+    for (const v of byCrop.values()) total += v;
+    return total > TROUGH_CAPACITY;
   },
 
   getTroughCountForCrop(crop: string): number {

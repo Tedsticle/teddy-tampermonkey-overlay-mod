@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Teddy's Magic Helper
 // @namespace    Quinoa
-// @version      1.3
+// @version      1.4
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
 // @match        https://magicgarden.gg/r/*
@@ -25967,11 +25967,10 @@
     }
     return null;
   }
-  async function _attemptRestock(species, cfg) {
-    if (!cfg.crop) return;
-    const need = cfg.restockTo - _countTroughByCrop(cfg.crop);
+  async function _attemptRestock(target) {
+    const need = target.restockTo - _countTroughByCrop(target.crop);
     if (need <= 0) return;
-    const item = _pickCropInventoryItem(cfg.crop, cfg.excludeMutations);
+    const item = _pickCropInventoryItem(target.crop, target.excludeMutations);
     if (!item?.id) return;
     const troughLen = Array.isArray(_lastTrough) ? _lastTrough.length : 0;
     const toIndex = Math.max(0, Math.min(TROUGH_CAPACITY - 1, troughLen));
@@ -25995,31 +25994,44 @@
       return false;
     }
   }
-  async function _attemptTrim(species, cfg) {
-    if (!cfg.crop) return;
+  async function _attemptTrim(target) {
     let guard = 0;
-    while (_countTroughByCrop(cfg.crop) > cfg.restockTo && guard++ < TROUGH_CAPACITY) {
+    while (_countTroughByCrop(target.crop) > target.restockTo && guard++ < TROUGH_CAPACITY) {
       const arr = Array.isArray(_lastTrough) ? _lastTrough : [];
-      const item = arr.find((it) => String(it?.species || "") === cfg.crop);
+      const item = arr.find((it) => String(it?.species || "") === target.crop);
       if (!item?.id) break;
       const ok = await _retrieveOneFromTrough(item);
       if (!ok) break;
       await new Promise((r) => setTimeout(r, 400));
     }
   }
-  async function _tick() {
-    _ensureConfigLoaded();
-    if (!_config.masterEnabled) return;
+  function _buildCropTargets() {
+    const byCrop = /* @__PURE__ */ new Map();
     for (const [species, cfg] of Object.entries(_config.species)) {
       if (!cfg.enabled || !cfg.crop || cfg.restockTo <= 0) continue;
       if (!_activeSpeciesSet.has(species)) continue;
-      if (_inFlight.has(species)) continue;
-      _inFlight.add(species);
+      const entry = byCrop.get(cfg.crop) ?? { restockTo: 0, excludeMutations: /* @__PURE__ */ new Set() };
+      entry.restockTo = Math.max(entry.restockTo, cfg.restockTo);
+      for (const m of cfg.excludeMutations) entry.excludeMutations.add(m);
+      byCrop.set(cfg.crop, entry);
+    }
+    return Array.from(byCrop.entries()).map(([crop, entry]) => ({
+      crop,
+      restockTo: entry.restockTo,
+      excludeMutations: Array.from(entry.excludeMutations)
+    }));
+  }
+  async function _tick() {
+    _ensureConfigLoaded();
+    if (!_config.masterEnabled) return;
+    for (const target of _buildCropTargets()) {
+      if (_inFlight.has(target.crop)) continue;
+      _inFlight.add(target.crop);
       try {
-        await _attemptRestock(species, cfg);
-        await _attemptTrim(species, cfg);
+        await _attemptRestock(target);
+        await _attemptTrim(target);
       } finally {
-        _inFlight.delete(species);
+        _inFlight.delete(target.crop);
       }
     }
   }
@@ -26179,18 +26191,33 @@
       _saveConfig();
       return { ...next };
     },
-    /** Sum of restockTo across all enabled+assigned species (for the 9-slot cap warning). */
+    /** Sum of per-crop max targets across all enabled+assigned species (for the
+     * 9-slot cap warning). Species sharing the same crop share one pool, so
+     * they're deduped by max — not summed — same as the restock engine. */
     getConfiguredRestockTotal(excludingSpecies) {
       _ensureConfigLoaded();
-      let total = 0;
+      const byCrop = /* @__PURE__ */ new Map();
       for (const [s, cfg] of Object.entries(_config.species)) {
         if (s === excludingSpecies) continue;
-        if (cfg.enabled && cfg.crop) total += cfg.restockTo;
+        if (!cfg.enabled || !cfg.crop) continue;
+        byCrop.set(cfg.crop, Math.max(byCrop.get(cfg.crop) ?? 0, cfg.restockTo));
       }
+      let total = 0;
+      for (const v of byCrop.values()) total += v;
       return total;
     },
-    wouldExceedCap(species, restockTo) {
-      return this.getConfiguredRestockTotal(species) + Math.max(0, restockTo) > TROUGH_CAPACITY;
+    wouldExceedCap(species, crop, restockTo) {
+      _ensureConfigLoaded();
+      const byCrop = /* @__PURE__ */ new Map();
+      for (const [s, cfg] of Object.entries(_config.species)) {
+        if (s === species) continue;
+        if (!cfg.enabled || !cfg.crop) continue;
+        byCrop.set(cfg.crop, Math.max(byCrop.get(cfg.crop) ?? 0, cfg.restockTo));
+      }
+      if (crop) byCrop.set(crop, Math.max(byCrop.get(crop) ?? 0, Math.max(0, restockTo)));
+      let total = 0;
+      for (const v of byCrop.values()) total += v;
+      return total > TROUGH_CAPACITY;
     },
     getTroughCountForCrop(crop) {
       return _countTroughByCrop(crop);
@@ -31206,7 +31233,7 @@
   // src/utils/version.ts
   function getLocalVersion() {
     if (true) {
-      return "1.3";
+      return "1.4";
     }
     if (typeof GM_info !== "undefined" && GM_info?.script?.version) {
       return GM_info.script.version;
@@ -46197,7 +46224,7 @@ next: ${next}`;
       function persist2() {
         const restockTo = Number(thresholdInput.value) || 0;
         const crop = cropSelect.value || null;
-        const exceeds = crop ? AutoFeedService.wouldExceedCap(species, restockTo) : false;
+        const exceeds = crop ? AutoFeedService.wouldExceedCap(species, crop, restockTo) : false;
         capWarning.style.display = exceeds ? "block" : "none";
         capWarning.textContent = exceeds ? `This would put your configured totals above the trough's ${TROUGH_CAPACITY}-crop cap.` : "";
         const next = {
